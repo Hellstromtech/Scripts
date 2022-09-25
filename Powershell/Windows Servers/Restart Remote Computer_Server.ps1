@@ -1,0 +1,1 @@
+Start-Sleep 60; Restart-Computer –Force –ComputerName TARGETMACHINE
