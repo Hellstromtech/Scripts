@@ -1,63 +1,61 @@
-    #Import Active Directory Module
-Import-Module ActiveDirectory 
+# Import the ActiveDirectory module
+Import-Module ActiveDirectory
 
+# Prompt the user for the name of the user to disable
+$userName = Read-Host "Enter the name of the user to disable"
 
-#Variables for Script
-$_Name=Read-Host Input sAMAccountname you wish to disable
-$_Date=Get-Date -Format MMddyyyy
-$_Creds=Get-Credential
+# Search for the user in Active Directory
+$user = Get-ADUser -Filter "Name -eq '$userName'"
 
-#Disable the Account by Input in $_Name Variable
-Disable-ADAccount -Identity $_Name -Credential $_Creds
-write-host Disabling $_Name -ForegroundColor Green
+# Check if the user was found
+if ($user) {
+    # Disable the user account
+    Disable-ADAccount -Identity $user
 
-#Pulls the Name by Input and Moves the Account to Disabled Users
-GEt-AdUser $_Name  Move-ADObject -TargetPath OU=wherever,OU=your,OU=disabled,OU=user,DC=ou,DC=is -Credential $_Creds
-write-host Moving $_Name to Disabled Users -ForegroundColor Green
+    # Generate a random password that is at least 20 characters long
+    $password = -Join ((65..90) + (97..122) | Get-Random -Count 20 | % {[char]$_})
 
-#Sets the Description to Date the Script was ran and scrubs Office and Department to clear up Dynamic Distribution Lists and AAD Dynamic Groups
-Set-ADUser $_Name -Description Disabled on $_Date -Office $null -Department $null -Credential $_Creds
-write-host Changing Description to Disabled on $_Date -ForegroundColor Green
+    # Set the password for the user
+    Set-ADAccountPassword -Identity $user -NewPassword (ConvertTo-SecureString $password -AsPlainText -Force)
 
-#Removes All Group Membership except for Domain Users from User
-$group = get-adgroup Domain Users
-$groupSid = $group.sid
-$groupSid
-[int]$GroupID = $groupSid.Value.Substring($groupSid.Value.LastIndexOf(-)+1)
-Get-ADUser $_Name  Set-ADObject -Replace @{primaryGroupID=$GroupID} -Credential $_Creds
-Remove-ADPrincipalGroupMembership -Identity $_Name -MemberOf $(Get-ADPrincipalGroupMembership -Identity $_Name -Credential $_Creds Where-Object {$_.Name -ne Domain Users}) -Confirm$false 
-Write-Host Removing All Group Membership for $_Name -ForegroundColor Green
+    # Move the user to the Disabled Users OU
+    $disabledUsersOU = "OU=Disabled Users,DC=example,DC=com"
+    Move-ADObject -Identity $user -TargetPath $disabledUsersOU
 
-#Creates a variable that configures a remote session to our Exchange Servers to allow Exchange commands through powershell 
-$s=New-PSSession -ConfigurationName microsoft.exchange -ConnectionUri httpyourexchangeserver.yourdomain.localpowershell -Credential $_Creds -AllowRedirection 
-Write-Host Creating New Exchange Session -ForegroundColor Green
+    # Set the description for the user to the current date
+    Set-ADUser -Identity $user -Description (Get-Date)
 
-#Imports the configured remote session
-Import-PSSession $s -DisableNameChecking
-Write-Host Importing New Exchange Session -ForegroundColor Green
+    # Clear the Office and Department attributes for the user
+    Set-ADUser -Identity $user -Office "" -Department ""
 
-#Hides User from GAL
-Set-Mailbox -Identity $_Name -HiddenFromAddressListsEnabled $false
-Set-Mailbox -Identity $_Name -HiddenFromAddressListsEnabled $true
-Write-Host Hiding $_Name from the GAL -ForegroundColor Green
+    # Remove the user from all groups except for Domain Users
+    $domainUsersGroup = Get-ADGroup -Filter "Name -eq 'Domain Users'"
+    Get-ADPrincipalGroupMembership $user | Where-Object {$_.Name -ne $domainUsersGroup.Name} | ForEach-Object {Remove-ADPrincipalGroupMembership -Identity $user -MemberOf $_}
+}
+else {
+    # The user was not found
+    Write-Output "User not found"
+}
 
-#Disables ActiveSync for the mailbox
-Set-CASMailbox -Identity $_Name -ActiveSyncEnabled $false 
-write-host ActiveSync has been Disabled for $_Name -ForegroundColor Green
+# Connect to Office 365
+$credential = Get-Credential
+$session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri https://outlook.office365.com/powershell-liveid/ -Credential $credential -Authentication Basic -AllowRedirection
+Import-PSSession $session
 
-#Removes Calendar Meeting Items in Exchange
-Search-Mailbox –identity $_Name –SearchQuery kindmeetings –DeleteContent
-Write-Host Removing Calendar Items for $_Name -ForegroundColor Green
+# Convert the mailbox to a shared mailbox
+Set-Mailbox -Identity $user.UserPrincipalName -Type Shared
 
-#AssignManagertheMailbox
-$_manager=(get-aduser (get-aduser $_Name -Properties manager).manager).samaccountName
-Add-MailboxPermission -Identity $_Name -User $_Manager -AccessRights FullAccess -InheritanceType All 
-Write-Host Assigning mailbox for $_Name to $_Manager -ForegroundColor Green
+# Remove all licenses from the user
+Set-MsolUser -UserPrincipalName $user.UserPrincipalName -UsageLocation "US" -LicenseOptions ""
 
-#closes the remote session
-Remove-PSSession $s  
-Write-Host Closing Exchange Session -ForegroundColor Green
+# Assign the mailbox to the user's manager
+$manager = Get-ADUser -Filter "SamAccountName -eq '$($user.Manager)'"
+$mailbox = Get-Mailbox -Identity $user.UserPrincipalName
+Set-Mailbox -Identity $mailbox -ManagedBy $manager.UserPrincipalName
 
+# Remove the user's access to the mailbox
+Set-Mailbox -Identity $mailbox -AccessRights FullAccess -User $manager.UserPrincipalName
+Remove-MailboxPermission -Identity $mailbox -User $user.UserPrincipalName -AccessRights FullAccess
 
-#Hard Stop for Script to keep window open
-Read-Host Press any key to close! 
+# Disconnect from Office 365
+Remove-PSSession $session
